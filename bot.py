@@ -123,6 +123,20 @@ def fetch_posts() -> list:
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
+    # --- DIAGNOSTIKA: nega 0 post topilishi mumkinligini aniqlash uchun ---
+    article_count = len(soup.select("article"))
+    print(
+        f"[debug] status={resp.status_code} content-length={len(resp.text)} "
+        f"article_soni={article_count}",
+        file=sys.stderr,
+    )
+    if article_count == 0:
+        # Sayt JS orqali render qiladimi yoki bloklayaptimi — tekshirish uchun
+        # javobning boshini logga chiqaramiz (maxfiy ma'lumot bo'lmasa kerak).
+        snippet = resp.text[:800].replace("\n", " ")
+        print(f"[debug] javob boshi: {snippet}", file=sys.stderr)
+    # --- DIAGNOSTIKA TUGADI ---
+
     posts = []
 
     for article in soup.select("article"):
