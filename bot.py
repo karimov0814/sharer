@@ -4,17 +4,25 @@ dyor.net/posts -> Telegram channel forwarder bot.
 
 Har ishga tushganda:
 1. https://dyor.net/posts sahifasini o'qiydi
-2. Yangi (hali yuborilmagan) "signal" postlarni topadi
-3. Ularni Telegram kanaliga yuboradi
+2. Yangi (hali yuborilmagan) "signal" postlarni topadi (RODY AI postlari)
+3. Ularni chiroyli formatlab Telegram kanaliga yuboradi
 4. Yuborilgan postlarni seen_ids.json faylida saqlaydi (qayta yubormaslik uchun)
 
-MUHIM: Quyidagi SELECTOR'larni saytning haqiqiy HTML tuzilishiga qarab
-sozlashingiz kerak (brauzerda F12 -> Inspect orqali ko'ring).
+Bu versiya saytning haqiqiy HTML tuzilishiga (siz yuborgan namunaga) moslab yozildi:
+- Har bir post <article> ichida
+- Coin/pair: "UNI" / "USDT"
+- Yo'nalish: bullish/bearish belgisi
+- Ishonch darajasi: "8.8/10"
+- Timeframe: "1d" / "4h"
+- Matn: reveal-widget ichida (qisqa qism + "Show more" ostidagi yashirin qism)
+- Entry / SL / TP qiymatlari
+- Coin sahifasiga link: /coin/<SYMBOL>/<PAIR>
+- Postning barqaror ID'si: mini-chart widgetidagi /posts/<ID>/chart-data manzilidan olinadi
 """
 
-import hashlib
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -38,6 +46,8 @@ REQUEST_HEADERS = {
     )
 }
 
+BASE_URL = "https://dyor.net"
+
 # ---------------------------------------------------------------------------
 # YORDAMCHI FUNKSIYALAR
 # ---------------------------------------------------------------------------
@@ -53,26 +63,61 @@ def load_seen_ids() -> set:
 
 
 def save_seen_ids(seen: set) -> None:
-    # ro'yxatni juda katta bo'lib ketmasligi uchun oxirgi 2000 tasini saqlaymiz
+    # ro'yxat juda katta bo'lib ketmasligi uchun oxirgi 2000 tasini saqlaymiz
     trimmed = list(seen)[-2000:]
     STATE_FILE.write_text(json.dumps(trimmed, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def make_post_id(post: dict) -> str:
-    """Post uchun barqaror (o'zgarmas) ID yasaydi, agar saytda alohida ID bo'lmasa."""
-    if post.get("url"):
-        return hashlib.sha256(post["url"].encode("utf-8")).hexdigest()
-    basis = (post.get("text") or "")[:200]
-    return hashlib.sha256(basis.encode("utf-8")).hexdigest()
+def _clean_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_full_text(article) -> str:
+    """
+    Post matnini reveal-widgetdan to'liq oladi:
+    ko'rinadigan qism + "Show more" ostidagi yashirin qism.
+    "..." (ellipsis) belgisini olib tashlaydi.
+    """
+    p_tag = article.select_one('div[data-controller="reveal"] p')
+    if not p_tag:
+        return ""
+
+    p_copy = BeautifulSoup(str(p_tag), "html.parser")
+    ellipsis = p_copy.select_one('[data-reveal-target="ellipsis"]')
+    if ellipsis:
+        ellipsis.decompose()
+
+    # hidden content spanini ochiq qismga tabiiy ravishda qo'shib olamiz
+    content_span = p_copy.select_one('[data-reveal-target="content"]')
+    if content_span:
+        del content_span["class"]  # "hidden" klassini olib tashlaymiz (faqat vizual)
+
+    return _clean_text(p_copy.get_text(" ", strip=True))
+
+
+def _extract_level(article, label: str) -> str | None:
+    """Entry / SL / TP kabi darajalarni chiqaradi."""
+    for span in article.select("span"):
+        label_span = span.select_one("span")
+        if label_span and _clean_text(label_span.get_text()) == label:
+            full = _clean_text(span.get_text())
+            return full[len(label):].strip()
+    return None
+
+
+def _extract_post_id(article) -> str | None:
+    chart_div = article.select_one("[data-mini-chart-url-value]")
+    if not chart_div:
+        return None
+    m = re.search(r"/posts/(\d+)/chart-data", chart_div["data-mini-chart-url-value"])
+    return m.group(1) if m else None
 
 
 def fetch_posts() -> list:
     """
-    dyor.net/posts sahifasidan postlarni chiqarib oladi.
-
-    !!! BU YERNI SOZLASH KERAK !!!
-    Quyidagi selectorlar FAQAT NAMUNA. Saytni Inspect qilib, haqiqiy
-    klass/teg nomlarini shu yerga yozing.
+    dyor.net/posts sahifasidan har bir RODY AI signal postini
+    to'liq ma'lumotlar (coin, yo'nalish, ishonch, narx darajalari, matn, link)
+    bilan birga chiqarib oladi.
     """
     resp = requests.get(SOURCE_URL, headers=REQUEST_HEADERS, timeout=20)
     resp.raise_for_status()
@@ -80,41 +125,137 @@ def fetch_posts() -> list:
 
     posts = []
 
-    # TODO: haqiqiy konteyner selectorini qo'ying, masalan:
-    # post_elements = soup.select("div.post-card")
-    post_elements = soup.select("[class*='post']")  # <-- vaqtinchalik, aniqlashtiring
+    for article in soup.select("article"):
+        post_id = _extract_post_id(article)
 
-    for el in post_elements:
-        # TODO: matn, link va (bo'lsa) rasm/sana selectorlarini moslang
-        text_el = el.select_one("[class*='text'], p")
-        link_el = el.select_one("a[href]")
+        # Coin belgisi (masalan "UNI") va juftlik ("USDT")
+        symbol_span = article.select_one(
+            "div.flex.items-center.gap-1\\.5.mb-2.flex-wrap span.font-semibold"
+        )
+        symbol = _clean_text(symbol_span.get_text()) if symbol_span else None
 
-        text = text_el.get_text(strip=True) if text_el else el.get_text(strip=True)
-        href = link_el["href"] if link_el else None
-        if href and href.startswith("/"):
-            href = "https://dyor.net" + href
+        pair_span = None
+        if symbol_span:
+            pair_span = symbol_span.find_next_sibling("span")
+        pair = _clean_text(pair_span.get_text()) if pair_span else None
 
-        if not text:
+        # Yo'nalish: bullish / bearish (▲/▼ belgisini olib tashlaymiz)
+        direction_span = article.select_one('span[style*="background:rgba"]')
+        direction = None
+        if direction_span:
+            raw = _clean_text(direction_span.get_text())
+            direction = re.sub(r"^[^\w]+", "", raw).strip()
+
+        # Timeframe (masalan "1d", "4h")
+        timeframe_span = article.select_one("span.font-mono.font-semibold")
+        timeframe = _clean_text(timeframe_span.get_text()) if timeframe_span else None
+
+        # Ishonch darajasi (masalan "8.8/10")
+        confidence_span = article.select_one("span.tabular-nums.text-emerald-600, span.tabular-nums.text-emerald-400")
+        confidence = _clean_text(confidence_span.get_text()) if confidence_span else None
+
+        # To'liq matn
+        text = _extract_full_text(article)
+
+        # Coin sahifasiga link
+        link_el = article.select_one('a[href^="/coin/"]')
+        href = BASE_URL + link_el["href"] if link_el else None
+
+        # Entry / SL / TP darajalari
+        entry = _extract_level(article, "Entry")
+        sl = _extract_level(article, "SL")
+        tp = _extract_level(article, "TP")
+
+        if not text and not symbol:
             continue
 
-        posts.append({"text": text, "url": href})
+        posts.append(
+            {
+                "post_id": post_id,
+                "symbol": symbol,
+                "pair": pair,
+                "direction": direction,
+                "timeframe": timeframe,
+                "confidence": confidence,
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
+                "text": text,
+                "url": href,
+            }
+        )
 
     return posts
 
 
-def send_to_telegram(text: str, url: str | None) -> bool:
+def make_post_id(post: dict) -> str:
+    """Post uchun barqaror ID: avvalo saytdagi haqiqiy post ID, aks holda link/matn asosida hash."""
+    if post.get("post_id"):
+        return f"post-{post['post_id']}"
+    if post.get("url"):
+        import hashlib
+
+        return hashlib.sha256(post["url"].encode("utf-8")).hexdigest()
+    import hashlib
+
+    basis = (post.get("text") or "")[:200]
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()
+
+
+def format_message(post: dict) -> str:
+    """Postni chiroyli Telegram xabariga formatlaydi."""
+    direction_emoji = "🟢" if (post.get("direction") or "").lower() == "bullish" else "🔴"
+
+    header_parts = []
+    if post.get("symbol"):
+        title = post["symbol"]
+        if post.get("pair"):
+            title += f"/{post['pair']}"
+        header_parts.append(f"<b>{title}</b>")
+    if post.get("direction"):
+        header_parts.append(f"{direction_emoji} {post['direction'].capitalize()}")
+    if post.get("timeframe"):
+        header_parts.append(f"⏱ {post['timeframe']}")
+    if post.get("confidence"):
+        header_parts.append(f"🎯 {post['confidence']}")
+
+    lines = [" | ".join(header_parts)] if header_parts else []
+
+    if post.get("text"):
+        lines.append("")
+        lines.append(post["text"])
+
+    levels = []
+    if post.get("entry"):
+        levels.append(f"Entry: {post['entry']}")
+    if post.get("sl"):
+        levels.append(f"SL: {post['sl']}")
+    if post.get("tp"):
+        levels.append(f"TP: {post['tp']}")
+    if levels:
+        lines.append("")
+        lines.append(" | ".join(levels))
+
+    if post.get("url"):
+        lines.append("")
+        lines.append(f"🔗 {post['url']}")
+
+    lines.append("")
+    lines.append("<i>NFA</i>")
+
+    return "\n".join(lines)
+
+
+def send_to_telegram(text: str) -> bool:
     if not BOT_TOKEN or not CHANNEL_ID:
         print("XATOLIK: BOT_TOKEN yoki CHANNEL_ID o'rnatilmagan.", file=sys.stderr)
         return False
 
-    message = text
-    if url:
-        message += f"\n\n🔗 {url}"
-
     api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHANNEL_ID,
-        "text": message,
+        "text": text,
+        "parse_mode": "HTML",
         "disable_web_page_preview": False,
     }
 
@@ -140,7 +281,8 @@ def main() -> None:
         if pid in seen:
             continue
 
-        sent = send_to_telegram(post["text"], post.get("url"))
+        message = format_message(post)
+        sent = send_to_telegram(message)
         if sent:
             seen.add(pid)
             new_count += 1
