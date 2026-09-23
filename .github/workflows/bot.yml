@@ -1,0 +1,39 @@
+name: DYOR -> Telegram forwarder
+
+on:
+  schedule:
+    # Har 10 daqiqada ishga tushadi (UTC bo'yicha). Xohlasangiz o'zgartiring.
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}  # "Run workflow" tugmasi orqali qo'lda ham ishga tushirish mumkin
+
+permissions:
+  contents: write  # seen_ids.json faylini repoga commit qilish uchun
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repo'ni olish
+        uses: actions/checkout@v4
+
+      - name: Python o'rnatish
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Kutubxonalarni o'rnatish
+        run: pip install -r requirements.txt
+
+      - name: Botni ishga tushirish
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+        run: python bot.py
+
+      - name: Holatni (seen_ids.json) repoga saqlash
+        run: |
+          git config user.name "dyor-bot"
+          git config user.email "dyor-bot@users.noreply.github.com"
+          git add seen_ids.json
+          git diff --staged --quiet || git commit -m "chore: update seen posts state"
+          git push
