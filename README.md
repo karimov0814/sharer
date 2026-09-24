@@ -39,6 +39,7 @@ Repo ichida: **Settings → Secrets and variables → Actions → New repository
 |---|---|
 | `BOT_TOKEN` | BotFather'dan olgan token |
 | `CHANNEL_ID` | Kanal username yoki ID (masalan `@mening_kanalim` yoki `-1001234567890`) |
+| `ADMIN_CHAT_ID` | *(ixtiyoriy, lekin tavsiya etiladi)* Bot ishlamay qolsa xato xabari keladigan shaxsiy chat/kanal ID'si — pastdagi "Xato haqida xabar" bo'limiga qarang |
 
 ## 5-qadam: Ishga tushirish
 
@@ -50,6 +51,30 @@ Repo ichida: **Settings → Secrets and variables → Actions → New repository
 - Bot har ishga tushganda `seen_ids.json` faylidan avval yuborilgan postlar ro'yxatini o'qiydi.
 - Yangi postlarni yuboradi, so'ng ro'yxatni yangilab, workflow avtomatik ravishda uni qaytadan repoga commit qiladi.
 - Shu tufayli bir xil post ikki marta yuborilmaydi, va bepul serverda "holat" (state) saqlanadi — alohida bazaga ehtiyoj yo'q.
+
+## 24/7 barqaror ishlashi uchun qo'shilgan qadamlar
+
+GitHub Actions'ning ikkita "yashirin" cheklovi bor, va workflow endi ularning ikkalasiga ham qarshi choralarga ega:
+
+### 1. 60 kunlik "faolsizlik" bo'yicha auto-disable
+
+GitHub qoidasi: agar repoda **60 kun davomida hech qanday commit bo'lmasa**, scheduled (`cron`) workflow **avtomatik o'chirib qo'yiladi**. Bu bot esa `seen_ids.json`ni faqat **yangi post topilganda** commit qiladi — demak, agar dyor.net saytida uzoq vaqt (60+ kun) yangi post chiqmasa, workflow jimgina o'chib qolishi mumkin edi.
+
+Buning oldini olish uchun har bir run boshida **"Repo faolligini saqlab turish"** qadami qo'shildi (`gautamkrishnar/keepalive-workflow`). Bu qadam:
+- Oxirgi commitdan necha kun o'tganini tekshiradi;
+- Agar 45+ kun bo'lsa, alohida `keepalive` branch'iga kichik "heartbeat" commit qo'shadi (asosiy `main` branch va `seen_ids.json`ga tegmaydi);
+- Aks holda hech narsa qilmaydi — resurs sarflamaydi.
+
+### 2. Xato haqida xabar (login muvaffaqiyatsiz, sayt strukturasi o'zgargan va h.k.)
+
+Avval bot xato bersa, buni faqat GitHub'ning **Actions** bo'limiga kirib logdan ko'rish mumkin edi. Endi run muvaffaqiyatsiz tugasa (masalan, login ishlamay qolsa yoki `fetch_posts()` hech narsa topa olmasa), **alohida Telegram xabari** avtomatik yuboriladi — bu xabar sizning kanalingizga emas, balki `ADMIN_CHAT_ID` orqali ko'rsatgan shaxsiy chatingizga/xizmat kanalizga tushadi.
+
+**Sozlash (ixtiyoriy, lekin tavsiya etiladi):**
+1. Botga (yoki istalgan botga) shaxsiy xabar yozing (`/start`).
+2. `https://api.telegram.org/bot<TOKEN>/getUpdates` orqali o'zingizning shaxsiy `chat.id`ingizni toping (xuddi kanal ID topgandagidek).
+3. Shu ID'ni `ADMIN_CHAT_ID` nomi bilan repo Secrets'ga qo'shing.
+
+Agar `ADMIN_CHAT_ID` qo'shilmasa — hech narsa buzilmaydi, bu qadam shunchaki o'tkazib yuboriladi.
 
 ## Mahalliy kompyuterda sinash
 
