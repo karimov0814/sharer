@@ -33,6 +33,8 @@ jobs:
 
       - name: Botni ishga tushirish
         env:
+          DYOR_EMAIL: ${{ secrets.DYOR_EMAIL }}
+          DYOR_PASSWORD: ${{ secrets.DYOR_PASSWORD }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
         run: python bot.py
