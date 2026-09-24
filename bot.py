@@ -3,21 +3,25 @@
 dyor.net/posts -> Telegram channel forwarder bot.
 
 Har ishga tushganda:
-1. https://dyor.net/posts sahifasini o'qiydi
-2. Yangi (hali yuborilmagan) "signal" postlarni topadi (RODY AI postlari)
-3. Ularni chiroyli formatlab Telegram kanaliga yuboradi
-4. Yuborilgan postlarni seen_ids.json faylida saqlaydi (qayta yubormaslik uchun)
+1. Foydalanuvchi nomidan https://dyor.net saytiga LOGIN qiladi (sessiya/cookie olinadi)
+2. https://dyor.net/posts sahifasini o'qiydi (login qilingan holda)
+3. Yangi (hali yuborilmagan) "signal" postlarni topadi (RODY AI postlari)
+4. Ularni chiroyli formatlab Telegram kanaliga yuboradi
+5. Yuborilgan postlarni seen_ids.json faylida saqlaydi (qayta yubormaslik uchun)
 
-Bu versiya saytning haqiqiy HTML tuzilishiga (siz yuborgan namunaga) moslab yozildi:
-- Har bir post <article> ichida
-- Coin/pair: "UNI" / "USDT"
-- Yo'nalish: bullish/bearish belgisi
-- Ishonch darajasi: "8.8/10"
-- Timeframe: "1d" / "4h"
-- Matn: reveal-widget ichida (qisqa qism + "Show more" ostidagi yashirin qism)
-- Entry / SL / TP qiymatlari
-- Coin sahifasiga link: /coin/<SYMBOL>/<PAIR>
-- Postning barqaror ID'si: mini-chart widgetidagi /posts/<ID>/chart-data manzilidan olinadi
+MUHIM: Bu skript sizning shaxsiy dyor.net hisobingizga kirish uchun DYOR_EMAIL va
+DYOR_PASSWORD environment o'zgaruvchilarini talab qiladi. Bularni hech qachon
+kodga yozmang — faqat GitHub Secrets orqali bering.
+
+Login: sayt Symfony frameworkda yozilgan, shuning uchun forma maydonlari
+"_username" / "_password" deb ataladi va "_csrf_token" nomli CSRF himoyasi bor.
+Bu token har safar login sahifasi ochilganda yangilanadi, shuning uchun avval
+GET so'rov bilan sahifani ochib tokenni o'qib olamiz, keyin shu token bilan
+POST qilamiz.
+
+Xavfsizlik: sessiya (cookie) ataylab faylga SAQLANMAYDI — har ishga tushganda
+yangi login qilinadi. Sabab: cookie'ni git repoga commit qilish xavfli (agar
+repo oshkor bo'lib qolsa yoki kimdir kirsa, hisobingizga kirib olishi mumkin).
 """
 
 import json
@@ -34,7 +38,13 @@ from bs4 import BeautifulSoup
 # SOZLAMALAR
 # ---------------------------------------------------------------------------
 
-SOURCE_URL = "https://dyor.net/posts"
+BASE_URL = "https://dyor.net"
+LOGIN_URL = f"{BASE_URL}/login"
+SOURCE_URL = f"{BASE_URL}/posts"
+
+DYOR_EMAIL = os.environ.get("DYOR_EMAIL", "")
+DYOR_PASSWORD = os.environ.get("DYOR_PASSWORD", "")
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "")  # masalan: @mening_kanalim yoki -1001234567890
 
@@ -46,7 +56,67 @@ REQUEST_HEADERS = {
     )
 }
 
-BASE_URL = "https://dyor.net"
+# ---------------------------------------------------------------------------
+# LOGIN
+# ---------------------------------------------------------------------------
+
+
+def login(session: requests.Session) -> None:
+    """
+    dyor.net saytiga login qiladi va sessiyani (cookie) `session` ichida saqlaydi.
+
+    Symfony login formasi:
+        <input name="_username">
+        <input name="_password">
+        <input type="hidden" name="_csrf_token" value="...">
+    """
+    if not DYOR_EMAIL or not DYOR_PASSWORD:
+        raise RuntimeError(
+            "DYOR_EMAIL yoki DYOR_PASSWORD o'rnatilmagan. "
+            "GitHub Secrets'ga qo'shishni unutmang."
+        )
+
+    # 1) Login sahifasini ochib, joriy CSRF tokenni olamiz.
+    resp = session.get(LOGIN_URL, timeout=20)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    token_input = soup.select_one('input[name="_csrf_token"]')
+    csrf_token = token_input.get("value") if token_input else None
+    print(f"[debug] login sahifasi ochildi, csrf_token topildimi: {bool(csrf_token)}", file=sys.stderr)
+
+    payload = {
+        "_username": DYOR_EMAIL,
+        "_password": DYOR_PASSWORD,
+    }
+    if csrf_token:
+        payload["_csrf_token"] = csrf_token
+
+    # 2) Login qilamiz.
+    login_resp = session.post(LOGIN_URL, data=payload, timeout=20, allow_redirects=True)
+    login_resp.raise_for_status()
+
+    # 3) Muvaffaqiyatli bo'lganini tekshiramiz: agar hali ham login sahifasida
+    #    turgan bo'lsak (parol maydoni hali mavjud) — demak login xato bo'lgan.
+    still_on_login = "/login" in login_resp.url or 'name="_password"' in login_resp.text
+    print(
+        f"[debug] login javobi: status={login_resp.status_code} "
+        f"final_url={login_resp.url} muvaffaqiyatli={not still_on_login}",
+        file=sys.stderr,
+    )
+    if still_on_login:
+        raise RuntimeError(
+            "Login muvaffaqiyatsiz bo'ldi. Email/parolni tekshiring, "
+            "yoki saytda qo'shimcha tekshiruv (captcha/2FA) talab qilinayotgan bo'lishi mumkin."
+        )
+
+
+def get_authenticated_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update(REQUEST_HEADERS)
+    login(session)
+    return session
+
 
 # ---------------------------------------------------------------------------
 # YORDAMCHI FUNKSIYALAR
@@ -87,7 +157,6 @@ def _extract_full_text(article) -> str:
     if ellipsis:
         ellipsis.decompose()
 
-    # hidden content spanini ochiq qismga tabiiy ravishda qo'shib olamiz
     content_span = p_copy.select_one('[data-reveal-target="content"]')
     if content_span:
         del content_span["class"]  # "hidden" klassini olib tashlaymiz (faqat vizual)
@@ -113,26 +182,23 @@ def _extract_post_id(article) -> str | None:
     return m.group(1) if m else None
 
 
-def fetch_posts() -> list:
+def fetch_posts(session: requests.Session) -> list:
     """
-    dyor.net/posts sahifasidan har bir RODY AI signal postini
-    to'liq ma'lumotlar (coin, yo'nalish, ishonch, narx darajalari, matn, link)
-    bilan birga chiqarib oladi.
+    dyor.net/posts sahifasidan (login qilingan sessiya orqali) har bir
+    RODY AI signal postini to'liq ma'lumotlar bilan chiqarib oladi.
     """
-    resp = requests.get(SOURCE_URL, headers=REQUEST_HEADERS, timeout=20)
+    resp = session.get(SOURCE_URL, timeout=20)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    # --- DIAGNOSTIKA: nega 0 post topilishi mumkinligini aniqlash uchun ---
+    # --- DIAGNOSTIKA ---
     article_count = len(soup.select("article"))
     print(
-        f"[debug] status={resp.status_code} content-length={len(resp.text)} "
-        f"article_soni={article_count}",
+        f"[debug] /posts: status={resp.status_code} final_url={resp.url} "
+        f"content-length={len(resp.text)} article_soni={article_count}",
         file=sys.stderr,
     )
     if article_count == 0:
-        # Sayt JS orqali render qiladimi yoki bloklayaptimi — tekshirish uchun
-        # javobning boshini logga chiqaramiz (maxfiy ma'lumot bo'lmasa kerak).
         snippet = resp.text[:800].replace("\n", " ")
         print(f"[debug] javob boshi: {snippet}", file=sys.stderr)
     # --- DIAGNOSTIKA TUGADI ---
@@ -142,40 +208,33 @@ def fetch_posts() -> list:
     for article in soup.select("article"):
         post_id = _extract_post_id(article)
 
-        # Coin belgisi (masalan "UNI") va juftlik ("USDT")
         symbol_span = article.select_one(
             "div.flex.items-center.gap-1\\.5.mb-2.flex-wrap span.font-semibold"
         )
         symbol = _clean_text(symbol_span.get_text()) if symbol_span else None
 
-        pair_span = None
-        if symbol_span:
-            pair_span = symbol_span.find_next_sibling("span")
+        pair_span = symbol_span.find_next_sibling("span") if symbol_span else None
         pair = _clean_text(pair_span.get_text()) if pair_span else None
 
-        # Yo'nalish: bullish / bearish (▲/▼ belgisini olib tashlaymiz)
         direction_span = article.select_one('span[style*="background:rgba"]')
         direction = None
         if direction_span:
             raw = _clean_text(direction_span.get_text())
             direction = re.sub(r"^[^\w]+", "", raw).strip()
 
-        # Timeframe (masalan "1d", "4h")
         timeframe_span = article.select_one("span.font-mono.font-semibold")
         timeframe = _clean_text(timeframe_span.get_text()) if timeframe_span else None
 
-        # Ishonch darajasi (masalan "8.8/10")
-        confidence_span = article.select_one("span.tabular-nums.text-emerald-600, span.tabular-nums.text-emerald-400")
+        confidence_span = article.select_one(
+            "span.tabular-nums.text-emerald-600, span.tabular-nums.text-emerald-400"
+        )
         confidence = _clean_text(confidence_span.get_text()) if confidence_span else None
 
-        # To'liq matn
         text = _extract_full_text(article)
 
-        # Coin sahifasiga link
         link_el = article.select_one('a[href^="/coin/"]')
         href = BASE_URL + link_el["href"] if link_el else None
 
-        # Entry / SL / TP darajalari
         entry = _extract_level(article, "Entry")
         sl = _extract_level(article, "SL")
         tp = _extract_level(article, "TP")
@@ -206,11 +265,10 @@ def make_post_id(post: dict) -> str:
     """Post uchun barqaror ID: avvalo saytdagi haqiqiy post ID, aks holda link/matn asosida hash."""
     if post.get("post_id"):
         return f"post-{post['post_id']}"
-    if post.get("url"):
-        import hashlib
-
-        return hashlib.sha256(post["url"].encode("utf-8")).hexdigest()
     import hashlib
+
+    if post.get("url"):
+        return hashlib.sha256(post["url"].encode("utf-8")).hexdigest()
 
     basis = (post.get("text") or "")[:200]
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()
@@ -282,14 +340,20 @@ def send_to_telegram(text: str) -> bool:
 
 def main() -> None:
     seen = load_seen_ids()
+
     try:
-        posts = fetch_posts()
+        session = get_authenticated_session()
+    except (requests.RequestException, RuntimeError) as exc:
+        print(f"Login/ulanishda xatolik: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        posts = fetch_posts(session)
     except requests.RequestException as exc:
         print(f"Sahifani olishda xatolik: {exc}", file=sys.stderr)
         sys.exit(1)
 
     new_count = 0
-    # eski postlardan yangilariga tartibda yuborish uchun teskari aylantiramiz
     for post in reversed(posts):
         pid = make_post_id(post)
         if pid in seen:
