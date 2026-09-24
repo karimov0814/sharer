@@ -23,6 +23,19 @@ jobs:
       - name: Repo'ni olish
         uses: actions/checkout@v4
 
+      - name: Repo faolligini saqlab turish (60 kunlik auto-disable bo'lmasligi uchun)
+        # GitHub qoidasi: repoda 60 kun commit bo'lmasa, scheduled workflow
+        # avtomatik o'chirib qo'yiladi. Bu bot esa faqat YANGI post topilganda
+        # commit qiladi, shuning uchun sayt uzoq vaqt jim tursa, workflow
+        # o'chib qolishi mumkin edi. Bu qadam shuni oldini oladi: agar oxirgi
+        # commitdan 45+ kun o'tgan bo'lsa, alohida branch'ga "heartbeat"
+        # commit qo'shib, faollikni yangilaydi (asosiy koddagi main branch va
+        # seen_ids.json'ga tegmaydi).
+        uses: gautamkrishnar/keepalive-workflow@v2
+        with:
+          committer_username: "dyor-bot"
+          committer_email: "dyor-bot@users.noreply.github.com"
+
       - name: Python o'rnatish
         uses: actions/setup-python@v5
         with:
@@ -32,6 +45,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Botni ishga tushirish
+        id: run_bot
         env:
           DYOR_EMAIL: ${{ secrets.DYOR_EMAIL }}
           DYOR_PASSWORD: ${{ secrets.DYOR_PASSWORD }}
@@ -39,18 +53,46 @@ jobs:
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
         run: python bot.py
 
-      - name: Holatni (seen_ids.json) repoga saqlash
+      - name: Holatni (seen_ids.json, filters.json) repoga saqlash
+        # "always()": bot.py xato bilan to'xtagan taqdirda ham, shu paytgacha
+        # yuborilgan postlar holati va admin filter o'zgarishlari yo'qolib
+        # ketmasin (aks holda ular keyingi runda qayta yuborilishi yoki
+        # tugma bosishlari yo'qolib qolishi mumkin edi).
+        if: always()
         run: |
           git config user.name "dyor-bot"
           git config user.email "dyor-bot@users.noreply.github.com"
-          git add seen_ids.json
+          git add seen_ids.json filters.json
           if git diff --staged --quiet; then
             echo "O'zgarish yo'q, commit qilinmadi."
           else
-            git commit -m "chore: update seen posts state"
+            git commit -m "chore: update seen posts state and filters"
             # Qo'shimcha xavfsizlik: push'dan oldin remote'dagi eng so'nggi
             # holatni tortib, uning ustiga qo'yamiz (concurrency guard baribir
             # asosiy himoya, lekin bu ikkinchi darajali strahovka).
             git pull --rebase origin main
             git push
+          fi
+
+      - name: Xatolik bo'lsa, admin'ga Telegram orqali xabar berish
+        # Bot login qila olmasa, sayt strukturasi o'zgarib qolsa yoki
+        # boshqa sabab bilan run muvaffaqiyatsiz tugasa — bu haqda alohida
+        # (kanaldan tashqari) shaxsiy/xizmat chatiga ogohlantirish keladi.
+        # ADMIN_CHAT_ID sozlanmagan bo'lsa, bu qadam shunchaki o'tkazib
+        # yuboriladi (xatoga sabab bo'lmaydi).
+        if: failure()
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
+        run: |
+          if [ -n "$BOT_TOKEN" ] && [ -n "$ADMIN_CHAT_ID" ]; then
+            RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            MSG=$(printf '⚠️ DYOR bot ishga tushishda xatolik yuz berdi.\nRepo: %s\nRun: %s\nLoglarni tekshiring.' "${GITHUB_REPOSITORY}" "${RUN_URL}")
+            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${ADMIN_CHAT_ID}" \
+              --data-urlencode "text=${MSG}" \
+              > /dev/null
+            echo "Admin'ga xato haqida xabar yuborildi."
+          else
+            echo "ADMIN_CHAT_ID (yoki BOT_TOKEN) o'rnatilmagan, xato xabari yuborilmadi. README'dagi qo'shimcha sozlash bo'limiga qarang."
           fi
