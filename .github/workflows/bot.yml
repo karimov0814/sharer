@@ -9,6 +9,13 @@ on:
 permissions:
   contents: write  # seen_ids.json faylini repoga commit qilish uchun
 
+concurrency:
+  # Bir vaqtning o'zida faqat bitta run ishlasin (cron va qo'lda ishga
+  # tushirish bir-biriga urilib, git push "rejected" bo'lib qolmasligi uchun).
+  # Navbatdagi run kutib turadi, avvalgisi tugagach ishga tushadi.
+  group: dyor-bot
+  cancel-in-progress: false
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
@@ -35,5 +42,13 @@ jobs:
           git config user.name "dyor-bot"
           git config user.email "dyor-bot@users.noreply.github.com"
           git add seen_ids.json
-          git diff --staged --quiet || git commit -m "chore: update seen posts state"
-          git push
+          if git diff --staged --quiet; then
+            echo "O'zgarish yo'q, commit qilinmadi."
+          else
+            git commit -m "chore: update seen posts state"
+            # Qo'shimcha xavfsizlik: push'dan oldin remote'dagi eng so'nggi
+            # holatni tortib, uning ustiga qo'yamiz (concurrency guard baribir
+            # asosiy himoya, lekin bu ikkinchi darajali strahovka).
+            git pull --rebase origin main
+            git push
+          fi
