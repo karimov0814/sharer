@@ -53,7 +53,19 @@ REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    )
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+}
+
+LOGIN_POST_HEADERS = {
+    **REQUEST_HEADERS,
+    "Content-Type": "application/x-www-form-urlencoded",
+    "Origin": BASE_URL,
+    "Referer": LOGIN_URL,
 }
 
 # ---------------------------------------------------------------------------
@@ -92,8 +104,10 @@ def login(session: requests.Session) -> None:
     if csrf_token:
         payload["_csrf_token"] = csrf_token
 
-    # 2) Login qilamiz.
-    login_resp = session.post(LOGIN_URL, data=payload, timeout=20, allow_redirects=True)
+    # 2) Login qilamiz (brauzerga o'xshash Origin/Referer header'lari bilan).
+    login_resp = session.post(
+        LOGIN_URL, data=payload, headers=LOGIN_POST_HEADERS, timeout=20, allow_redirects=True
+    )
     login_resp.raise_for_status()
 
     # 3) Muvaffaqiyatli bo'lganini tekshiramiz: agar hali ham login sahifasida
@@ -105,6 +119,25 @@ def login(session: requests.Session) -> None:
         file=sys.stderr,
     )
     if still_on_login:
+        # Sababni aniqlashga harakat qilamiz: xato xabari, captcha, yoki boshqa narsa.
+        fail_soup = BeautifulSoup(login_resp.text, "html.parser")
+
+        # Odatiy xato xabari elementlari (Symfony/Bootstrap-uslub loyihalarda ko'p uchraydi)
+        error_el = fail_soup.select_one(
+            ".alert, .alert-danger, .flash, [class*='error'], [role='alert']"
+        )
+        error_text = _clean_text(error_el.get_text()) if error_el else None
+
+        lower_html = login_resp.text.lower()
+        has_captcha = any(
+            kw in lower_html for kw in ("captcha", "recaptcha", "hcaptcha", "turnstile", "cf-turnstile")
+        )
+
+        print(f"[debug] sahifadagi xato xabari: {error_text!r}", file=sys.stderr)
+        print(f"[debug] captcha/bot-tekshiruv izlari bormi: {has_captcha}", file=sys.stderr)
+        snippet = login_resp.text[:1200].replace("\n", " ")
+        print(f"[debug] login javobi HTML (birinchi 1200 belgi): {snippet}", file=sys.stderr)
+
         raise RuntimeError(
             "Login muvaffaqiyatsiz bo'ldi. Email/parolni tekshiring, "
             "yoki saytda qo'shimcha tekshiruv (captcha/2FA) talab qilinayotgan bo'lishi mumkin."
