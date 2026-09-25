@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write  # seen_ids.json faylini repoga commit qilish uchun
+  actions: write   # workflow'ni GitHub API orqali faol saqlash uchun (pastdagi qadam)
 
 concurrency:
   # Bir vaqtning o'zida faqat bitta run ishlasin (cron va qo'lda ishga
@@ -22,19 +23,6 @@ jobs:
     steps:
       - name: Repo'ni olish
         uses: actions/checkout@v4
-
-      - name: Repo faolligini saqlab turish (60 kunlik auto-disable bo'lmasligi uchun)
-        # GitHub qoidasi: repoda 60 kun commit bo'lmasa, scheduled workflow
-        # avtomatik o'chirib qo'yiladi. Bu bot esa faqat YANGI post topilganda
-        # commit qiladi, shuning uchun sayt uzoq vaqt jim tursa, workflow
-        # o'chib qolishi mumkin edi. Bu qadam shuni oldini oladi: agar oxirgi
-        # commitdan 45+ kun o'tgan bo'lsa, alohida branch'ga "heartbeat"
-        # commit qo'shib, faollikni yangilaydi (asosiy koddagi main branch va
-        # seen_ids.json'ga tegmaydi).
-        uses: gautamkrishnar/keepalive-workflow@v2
-        with:
-          committer_username: "dyor-bot"
-          committer_email: "dyor-bot@users.noreply.github.com"
 
       - name: Python o'rnatish
         uses: actions/setup-python@v5
@@ -73,6 +61,20 @@ jobs:
             git pull --rebase origin main
             git push
           fi
+
+      - name: Workflow'ni faol saqlash (60 kunlik auto-disable bo'lmasligi uchun)
+        # GitHub qoidasi: repoda 60 kun faollik bo'lmasa, scheduled workflow
+        # avtomatik o'chiriladi. Buni oldini olish uchun GitHub API'ning
+        # "enable workflow" chaqiruvini to'g'ridan-to'g'ri qilamiz (runner'da
+        # oldindan o'rnatilgan `gh` CLI orqali, tashqi action'siz).
+        # AVVAL bu yerda gautamkrishnar/keepalive-workflow action'i edi — u
+        # GitHub tomonidan BLOKLANDI va barcha run'lar "Repository access
+        # blocked" xatosi bilan boshlanmasdanoq to'xtab qolardi.
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/bot.yml/enable" && echo "Workflow faol holatda."
 
       - name: Xatolik bo'lsa, admin'ga Telegram orqali xabar berish
         # Bot login qila olmasa, sayt strukturasi o'zgarib qolsa yoki
