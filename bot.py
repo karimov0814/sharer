@@ -34,13 +34,16 @@ yangi login qilinadi. Sabab: cookie'ni git repoga commit qilish xavfli (agar
 repo oshkor bo'lib qolsa yoki kimdir kirsa, hisobingizga kirib olishi mumkin).
 """
 
+import base64
 import copy
+import html
 import json
 import os
 import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Optional
 
@@ -65,6 +68,16 @@ CHANNEL_ID = os.environ.get("CHANNEL_ID", "")  # masalan: @mening_kanalim yoki -
 # Bo'sh bo'lsa, /filters paneli ishlamaydi (lekin bot oddiy forward rejimida
 # ishlashda davom etadi: barcha filterlar standart holatda "yoqilgan" bo'ladi).
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
+
+# Qisqa mazmun (EN + UZ) uchun Anthropic API kaliti. Bo'sh bo'lsa, xabar
+# mazmunsiz (faqat signal qismi bilan) yuboriladi — bot ishlashda davom etadi.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "") or "claude-haiku-4-5-20251001"
+
+# Telegram Mini App'ning direct link'i, masalan: https://t.me/mening_botim/chart
+# (BotFather -> /newapp orqali yaratiladi, README'ga qarang). Bo'sh bo'lsa,
+# "Live chart" tugmasi TradingView saytini Telegram ichki brauzerida ochadi.
+CHART_APP_LINK = os.environ.get("CHART_APP_LINK", "").rstrip("/")
 
 STATE_FILE = Path(__file__).parent / "seen_ids.json"
 FILTERS_FILE = Path(__file__).parent / "filters.json"
@@ -415,10 +428,17 @@ def fetch_posts(session: requests.Session, filters: dict) -> list:
             if timeframe not in tf_map:
                 tf_map[timeframe] = True  # yangi timeframe -> standart holatda yoqilgan
 
-        confidence_span = article.select_one(
-            "span.tabular-nums.text-emerald-600, span.tabular-nums.text-emerald-400"
-        )
-        confidence = _clean_text(confidence_span.get_text()) if confidence_span else None
+        # Ishonch darajasi saytda "8.1/10" ko'rinishida chiqadi. Avval u yashil
+        # rang klassi (text-emerald-*) orqali qidirilardi — lekin ishonch past
+        # bo'lsa u boshqa rangda chiqadi va o'rniga xuddi shu yashil rangdagi
+        # "Entry $..." yozuvi olinib qolardi. Endi rangga emas, matn shakliga
+        # qaraymiz: faqat "X/10" ko'rinishidagi yozuv ishonch deb olinadi.
+        confidence = None
+        for span in article.select("span"):
+            span_text = _clean_text(span.get_text())
+            if re.fullmatch(r"\d{1,2}(?:\.\d+)?\s*/\s*10", span_text):
+                confidence = span_text.replace(" ", "")
+                break
 
         text = _extract_full_text(article)
 
@@ -473,48 +493,179 @@ def make_post_id(post: dict) -> str:
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
 
-def format_message(post: dict) -> str:
-    """Postni chiroyli Telegram xabariga formatlaydi."""
-    direction_emoji = "🟢" if (post.get("direction") or "").lower() == "bullish" else "🔴"
+# --- Narxlar -----------------------------------------------------------------
 
-    header_parts = []
-    if post.get("symbol"):
-        title = post["symbol"]
-        if post.get("pair"):
-            title += f"/{post['pair']}"
-        header_parts.append(f"<b>{title}</b>")
-    if post.get("direction"):
-        header_parts.append(f"{direction_emoji} {post['direction'].capitalize()}")
+def _parse_prices(raw: Optional[str]) -> list:
+    """"$0.054719 – $0.057100" -> [Decimal('0.054719'), Decimal('0.0571')]"""
+    if not raw:
+        return []
+    out = []
+    for num in re.findall(r"\d[\d,]*(?:\.\d+)?", raw):
+        try:
+            out.append(Decimal(num.replace(",", "")))
+        except InvalidOperation:
+            pass
+    return out
+
+
+def fmt_price(value: Decimal) -> str:
+    """Ortiqcha nollarsiz: 0.05710000 -> 0.0571, 4260.010 -> 4,260.01"""
+    text = format(value.normalize(), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    if value >= 1000:
+        whole, _, frac = text.partition(".")
+        text = f"{int(whole):,}" + (f".{frac}" if frac else "")
+    return text
+
+
+def _pct_from(base: Decimal, target: Decimal) -> str:
+    pct = (target - base) / base * 100
+    sign = "+" if pct >= 0 else "−"
+    return f"{sign}{abs(pct):.1f}%"
+
+
+# --- Qisqa mazmun (EN + UZ) ----------------------------------------------------
+
+SUMMARY_PROMPT = """You summarize crypto trading setup notes for a Telegram channel.
+
+Setup: {title}, timeframe {tf}, bias {direction}.
+Full analysis:
+<analysis>
+{text}
+</analysis>
+
+Write ONE short sentence (max 140 characters) capturing the key takeaway: the trend
+and the main risk or level to watch. Do not repeat the entry/TP/SL prices and do not
+give advice. Then translate that same sentence into Uzbek (Latin script, natural
+trader language; keep terms like RSI, support, resistance as commonly used).
+
+Respond with JSON only, no markdown:
+{{"en": "...", "uz": "..."}}"""
+
+
+def summarize_post(post: dict) -> Optional[dict]:
+    """AI matnining 1 jumlalik EN + UZ mazmuni. Xato bo'lsa None (xabar mazmunsiz ketadi)."""
+    text = post.get("text")
+    if not ANTHROPIC_API_KEY or not text:
+        return None
+    title = f"{post.get('symbol')}/{post.get('pair')}"
+    prompt = SUMMARY_PROMPT.format(
+        title=title, tf=post.get("timeframe"), direction=post.get("direction"), text=text
+    )
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": ANTHROPIC_MODEL,
+                "max_tokens": 400,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=45,
+        )
+        if resp.status_code != 200:
+            print(f"[warn] Anthropic API xatolik: {resp.status_code} {resp.text[:300]}", file=sys.stderr)
+            return None
+        raw = "".join(b.get("text", "") for b in resp.json().get("content", []) if b.get("type") == "text")
+        raw = re.sub(r"^```(?:json)?|```$", "", raw.strip()).strip()
+        data = json.loads(raw)
+        en, uz = (data.get("en") or "").strip(), (data.get("uz") or "").strip()
+        if en and uz:
+            return {"en": en, "uz": uz}
+    except (requests.RequestException, ValueError, AttributeError) as exc:
+        print(f"[warn] Mazmun yaratib bo'lmadi ({title}): {exc}", file=sys.stderr)
+    return None
+
+
+# --- Live chart havolasi ---------------------------------------------------------
+
+TV_INTERVALS = {"15m": "15", "1h": "60", "4h": "240", "1d": "D", "3d": "3D", "1w": "W"}
+
+
+def _tv_symbol(post: dict) -> str:
+    symbol = (post.get("symbol") or "").upper()
+    pair = (post.get("pair") or "USDT").upper()
+    if pair == "PERP":
+        return f"BINANCE:{symbol}USDT.P"
+    return f"BINANCE:{symbol}{pair}"
+
+
+def chart_url(post: dict) -> str:
+    """
+    Mini App sozlangan bo'lsa: Telegram ichida ochiladigan direct link
+    (t.me/<bot>/<app>?startapp=...). startapp faqat A-Z a-z 0-9 _ - belgilarini
+    qabul qiladi, shuning uchun ma'lumotni base64url qilib joylaymiz.
+    Aks holda: TradingView chart sahifasi (Telegram ichki brauzerida ochiladi).
+    """
+    tf = (post.get("timeframe") or "1d").lower()
+    if CHART_APP_LINK:
+        payload = {
+            "s": post.get("symbol"),
+            "p": post.get("pair") or "USDT",
+            "t": tf,
+            "d": (post.get("direction") or "").lower()[:4],  # bull / bear
+            "e": post.get("entry"),
+            "tp": post.get("tp"),
+            "sl": post.get("sl"),
+        }
+        compact = json.dumps({k: v for k, v in payload.items() if v}, separators=(",", ":"))
+        token = base64.urlsafe_b64encode(compact.encode()).decode().rstrip("=")
+        if len(token) <= 500:  # Telegram chegarasi 512 belgi
+            return f"{CHART_APP_LINK}?startapp={token}"
+    interval = TV_INTERVALS.get(tf, "D")
+    return f"https://www.tradingview.com/chart/?symbol={_tv_symbol(post)}&interval={interval}"
+
+
+# --- Xabar ------------------------------------------------------------------------
+
+def format_message(post: dict, summary: Optional[dict] = None) -> tuple:
+    """(matn, inline_keyboard) qaytaradi."""
+    esc = lambda value: html.escape(str(value), quote=False)  # apostrof (o'zbekcha) buzilmasin
+    bullish = (post.get("direction") or "").lower() == "bullish"
+    side = "LONG" if bullish else "SHORT"
+    emoji = "🟢" if bullish else "🔴"
+
+    title = esc(post.get("symbol") or "?")
+    if post.get("pair"):
+        title += f"/{esc(post['pair'])}"
+    header = [f"{emoji} <b>{title}</b>", side]
     if post.get("timeframe"):
-        header_parts.append(f"⏱ {post['timeframe']}")
+        header.append(esc(post["timeframe"]))
     if post.get("confidence"):
-        header_parts.append(f"🎯 {post['confidence']}")
+        header.append(f"🎯 {esc(post['confidence'])}")
+    lines = [" · ".join(header)]
 
-    lines = [" | ".join(header_parts)] if header_parts else []
+    entry = _parse_prices(post.get("entry"))
+    tps = _parse_prices(post.get("tp"))
+    sls = _parse_prices(post.get("sl"))
+    base = sum(entry) / len(entry) if entry else None
 
-    if post.get("text"):
+    if entry:
+        lines.append(f"Entry: <code>{' – '.join(fmt_price(v) for v in entry)}</code>")
+    for label, values in (("TP", tps), ("SL", sls)):
+        for v in values:
+            extra = f" ({_pct_from(base, v)})" if base else ""
+            lines.append(f"{label}: <code>{fmt_price(v)}</code>{extra}")
+
+    if summary:
         lines.append("")
-        lines.append(post["text"])
-
-    levels = []
-    if post.get("entry"):
-        levels.append(f"Entry: {post['entry']}")
-    if post.get("sl"):
-        levels.append(f"SL: {post['sl']}")
-    if post.get("tp"):
-        levels.append(f"TP: {post['tp']}")
-    if levels:
-        lines.append("")
-        lines.append(" | ".join(levels))
-
-    if post.get("url"):
-        lines.append("")
-        lines.append(f"🔗 {post['url']}")
+        lines.append(f"🇬🇧 {esc(summary['en'])}")
+        lines.append(f"🇺🇿 {esc(summary['uz'])}")
 
     lines.append("")
     lines.append("<i>NFA</i>")
 
-    return "\n".join(lines)
+    tf_label = post.get("timeframe") or ""
+    buttons = [{"text": f"📈 Live chart {tf_label}".strip(), "url": chart_url(post)}]
+    if post.get("url"):
+        buttons.append({"text": "🔎 DYOR", "url": post["url"]})
+
+    return "\n".join(lines), [buttons]
 
 
 # ---------------------------------------------------------------------------
@@ -607,20 +758,21 @@ def tg_request(method: str, payload: dict, timeout: int = 20) -> Optional[dict]:
         return None
 
 
-def send_to_telegram(text: str) -> bool:
+def send_to_telegram(text: str, keyboard: Optional[list] = None) -> bool:
     if not CHANNEL_ID:
         print("XATOLIK: CHANNEL_ID o'rnatilmagan.", file=sys.stderr)
         return False
 
-    result = tg_request(
-        "sendMessage",
-        {
-            "chat_id": CHANNEL_ID,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": False,
-        },
-    )
+    payload = {
+        "chat_id": CHANNEL_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        # Havola kartochkasi (preview) xabarni 2 barobar uzaytirardi — o'chirildi.
+        "link_preview_options": {"is_disabled": True},
+    }
+    if keyboard:
+        payload["reply_markup"] = {"inline_keyboard": keyboard}
+    result = tg_request("sendMessage", payload)
     return bool(result and result.get("ok"))
 
 
@@ -936,8 +1088,8 @@ def main() -> None:
             skipped_filter += 1
             continue
 
-        message = format_message(post)
-        sent = send_to_telegram(message)
+        message, keyboard = format_message(post, summarize_post(post))
+        sent = send_to_telegram(message, keyboard)
         if sent:
             seen.add(pid)
             new_count += 1

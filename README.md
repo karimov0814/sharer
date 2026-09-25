@@ -131,3 +131,38 @@ python bot.py
 
 - Saytni tez-tez (masalan, har daqiqada) so'rash o'rniga 5-15 daqiqalik oraliq tavsiya etiladi — bu ham saytga hurmat, ham GitHub Actions limitiga tejamkor.
 - dyor.net'ning foydalanish shartlarini (Terms of Service) tekshirib chiqish tavsiya etiladi, chunki avtomatik scraping ba'zi saytlarda cheklangan bo'lishi mumkin.
+
+
+## Xabar formati, qisqa mazmun va Live chart
+
+Kanalga yuboriladigan xabar ixcham ko'rinishda bo'ladi:
+
+```
+🟢 PHA/USDT · LONG · 1d · 🎯 8.1/10
+Entry: 0.054719 – 0.0571
+TP: 0.059955 (+7.2%)
+SL: 0.0494 (−11.6%)
+
+🇬🇧 Strong uptrend, but RSI 84 is overbought — watch for a pullback.
+🇺🇿 Kuchli o'sish trendi, lekin RSI 84 — qaytish ehtimoliga e'tibor bering.
+
+NFA
+[📈 Live chart 1d] [🔎 DYOR]
+```
+
+TP va SL foizlari Entry oralig'ining o'rtasiga nisbatan hisoblanadi. Havola kartochkasi (preview) o'chirilgan.
+
+### Qisqa mazmun (ixtiyoriy)
+
+1. https://console.anthropic.com saytida API kalit oling (hisobda kredit bo'lishi kerak).
+2. Uni `ANTHROPIC_API_KEY` nomi bilan repo Secrets'ga qo'shing.
+
+Kalit bo'lmasa yoki API xato bersa, xabar mazmun qismisiz yuboriladi va bot ishlashda davom etadi. Model standart holatda `claude-haiku-4-5-20251001`. Uni `ANTHROPIC_MODEL` secret'i orqali o'zgartirish mumkin.
+
+### Live chart Mini App (ixtiyoriy, lekin tavsiya etiladi)
+
+Sozlanmagan bo'lsa, "Live chart" tugmasi TradingView saytini Telegram ichki brauzerida ochadi. Sozlansa, Telegram ichida to'liq ekranli interaktiv grafik ochiladi: kattalashtirish, surish, indikatorlar va chizish asboblari bilan, tepada Entry/TP/SL darajalari ko'rinib turadi.
+
+1. **GitHub Pages'ni yoqing:** repo → Settings → Pages → Source: "Deploy from a branch" → Branch: `main`, papka: `/docs` → Save. Bir necha daqiqadan keyin sahifa `https://<github-username>.github.io/<repo>/chart.html` manzilida ochiladi. (Bepul tarifda Pages faqat public repoda ishlaydi.)
+2. **Mini App yarating:** @BotFather → `/newapp` → botingizni tanlang → nom va tavsif kiriting → rasm sifatida `docs/botfather-cover-640x360.png` ni yuboring → GIF so'rasa `/empty` → URL sifatida 1-qadamdagi manzilni kiriting → short name kiriting (masalan `chart`).
+3. BotFather sizga `https://t.me/<bot_username>/chart` ko'rinishidagi havola beradi. Uni `CHART_APP_LINK` nomi bilan repo Secrets'ga qo'shing.

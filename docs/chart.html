@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Live chart</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #17212b);
+    --text: var(--tg-theme-text-color, #f5f5f5);
+    --hint: var(--tg-theme-hint-color, #7d8b99);
+    --panel: var(--tg-theme-secondary-bg-color, #232e3c);
+    --accent: var(--tg-theme-button-color, #5288c1);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --up: #22b573;
+    --down: #e5484d;
+    --top-inset: calc(var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px));
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font: 15px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", Roboto, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    display: flex; flex-direction: column;
+    height: var(--tg-viewport-stable-height, 100dvh);
+    padding-top: var(--top-inset);
+    overflow: hidden;
+  }
+  header { padding: 12px 14px 10px; }
+  .title-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+  h1 small { font-size: 15px; font-weight: 500; color: var(--hint); }
+  .side {
+    font-size: 13px; font-weight: 700; padding: 2px 8px; border-radius: 6px;
+    color: #fff; background: var(--hint);
+  }
+  .side.up { background: var(--up); }
+  .side.down { background: var(--down); }
+  .tf { font-size: 14px; color: var(--hint); }
+
+  .levels {
+    display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 1px;
+    margin-top: 10px; border-radius: 10px; overflow: hidden;
+    background: color-mix(in srgb, var(--hint) 25%, transparent);
+  }
+  .level { background: var(--panel); padding: 7px 10px; min-width: 0; }
+  .level span { display: block; font-size: 12px; color: var(--hint); }
+  .level b {
+    display: block; font-size: 14px; font-weight: 600;
+    font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .level i { font-style: normal; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .level.tp i { color: var(--up); }
+  .level.sl i { color: var(--down); }
+
+  .exchanges { display: flex; gap: 6px; margin-top: 10px; }
+  .exchanges button {
+    font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 999px; cursor: pointer;
+    border: 1px solid color-mix(in srgb, var(--hint) 45%, transparent);
+    background: transparent; color: var(--text);
+  }
+  .exchanges button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  .exchanges button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  #tv { flex: 1; min-height: 0; }
+  .empty { margin: auto; padding: 24px; text-align: center; color: var(--hint); max-width: 32ch; }
+  .empty strong { display: block; color: var(--text); font-size: 17px; margin-bottom: 6px; }
+</style>
+</head>
+<body>
+  <header id="head" hidden>
+    <div class="title-row">
+      <h1 id="pair"></h1>
+      <span class="side" id="side"></span>
+      <span class="tf" id="tf"></span>
+    </div>
+    <div class="levels" id="levels" hidden></div>
+    <div class="exchanges" id="exchanges" role="group" aria-label="Exchange"></div>
+  </header>
+  <div id="tv"></div>
+
+<script>
+(function () {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) {
+    tg.ready();
+    tg.expand();
+    // Grafikni barmoq bilan tepaga-pastga surganda Mini App yopilib qolmasin.
+    if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
+    try {
+      tg.setHeaderColor("bg_color");
+      tg.setBackgroundColor("bg_color");
+    } catch (e) {}
+  }
+
+  // --- Parametrlarni o'qish: Telegram start_param yoki (brauzerda sinash uchun) ?startapp=
+  const qs = new URLSearchParams(location.search);
+  const raw = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) ||
+              qs.get("startapp") || qs.get("tgWebAppStartParam") || "";
+  let p = null;
+  try {
+    const b64 = raw.replace(/-/g, "+").replace(/_/g, "/");
+    const json = decodeURIComponent(escape(atob(b64 + "===".slice((b64.length + 3) % 4))));
+    p = JSON.parse(json);
+  } catch (e) { p = null; }
+
+  const tv = document.getElementById("tv");
+  if (!p || !p.s) {
+    tv.innerHTML = '<div class="empty"><strong>No chart selected</strong>' +
+      "Open this chart from a signal in the channel using the “Live chart” button.</div>";
+    return;
+  }
+
+  const symbol = String(p.s).toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const pair = String(p.p || "USDT").toUpperCase();
+  const isPerp = pair === "PERP";
+  const quote = isPerp ? "USDT" : pair;
+  const tf = String(p.t || "1d").toLowerCase();
+  const intervals = { "15m": "15", "1h": "60", "4h": "240", "1d": "D", "3d": "3D", "1w": "W" };
+  const interval = intervals[tf] || "D";
+
+  // --- Sarlavha
+  document.getElementById("pair").innerHTML = symbol + "<small>/" + (isPerp ? "USDT perp" : quote) + "</small>";
+  const side = document.getElementById("side");
+  if (p.d === "bull") { side.textContent = "Long"; side.className = "side up"; }
+  else if (p.d === "bear") { side.textContent = "Short"; side.className = "side down"; }
+  else side.hidden = true;
+  document.getElementById("tf").textContent = tf;
+  document.getElementById("head").hidden = false;
+
+  // --- Darajalar (Entry / TP / SL)
+  const nums = s => (String(s || "").match(/\d[\d,]*(?:\.\d+)?/g) || []).map(x => parseFloat(x.replace(/,/g, "")));
+  const fmt = v => {
+    const digits = v >= 1 ? 2 : Math.min(8, 2 - Math.floor(Math.log10(v)) + 2);
+    return Number(v.toFixed(digits)).toLocaleString("en-US", { maximumFractionDigits: 8 });
+  };
+  const entry = nums(p.e), tps = nums(p.tp), sls = nums(p.sl);
+  const base = entry.length ? entry.reduce((a, b) => a + b, 0) / entry.length : null;
+  const pct = v => {
+    if (!base) return "";
+    const d = (v - base) / base * 100;
+    return (d >= 0 ? "+" : "−") + Math.abs(d).toFixed(1) + "%";
+  };
+  const cells = [];
+  if (entry.length) cells.push(`<div class="level"><span>Entry</span><b>${entry.map(fmt).join(" – ")}</b></div>`);
+  if (tps.length) cells.push(`<div class="level tp"><span>Take profit</span><b>${fmt(tps[0])}</b><i>${pct(tps[0])}</i></div>`);
+  if (sls.length) cells.push(`<div class="level sl"><span>Stop loss</span><b>${fmt(sls[0])}</b><i>${pct(sls[0])}</i></div>`);
+  if (cells.length) {
+    const lv = document.getElementById("levels");
+    lv.innerHTML = cells.join("");
+    lv.style.gridTemplateColumns = cells.length === 3 ? "1.4fr 1fr 1fr" : `repeat(${cells.length}, 1fr)`;
+    lv.hidden = false;
+  }
+
+  // --- TradingView grafigi
+  const dark = tg ? tg.colorScheme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  const lang = ((tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.language_code) || navigator.language || "en").slice(0, 2);
+  let tz = "Etc/UTC";
+  try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || tz; } catch (e) {}
+
+  const tvSymbol = ex => ex + ":" + symbol + quote + (isPerp ? ".P" : "");
+  let widgetReady = null;
+  function loadTradingView() {
+    if (widgetReady) return widgetReady;
+    widgetReady = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "https://s3.tradingview.com/tv.js";
+      s.onload = resolve; s.onerror = reject;
+      document.head.appendChild(s);
+    });
+    return widgetReady;
+  }
+  function render(exchange) {
+    document.querySelectorAll("#exchanges button").forEach(b =>
+      b.setAttribute("aria-pressed", String(b.dataset.ex === exchange)));
+    tv.innerHTML = '<div id="tv_inner" style="height:100%"></div>';
+    loadTradingView().then(() => {
+      new TradingView.widget({
+        container_id: "tv_inner",
+        autosize: true,
+        symbol: tvSymbol(exchange),
+        interval: interval,
+        timezone: tz,
+        theme: dark ? "dark" : "light",
+        style: "1",
+        locale: lang === "ru" ? "ru" : "en",
+        allow_symbol_change: true,
+        hide_side_toolbar: false,   // chizish asboblari (trend chiziq, Fibo...)
+        withdateranges: true,
+        enable_publishing: false,
+        save_image: false
+      });
+    }).catch(() => {
+      tv.innerHTML = '<div class="empty"><strong>Chart could not load</strong>' +
+        "Check your internet connection and reopen the chart.</div>";
+    });
+  }
+
+  // --- Birja tanlash: avval Binance'da bor-yo'qligini tekshiramiz, bo'lmasa Bybit
+  const exchanges = ["BINANCE", "BYBIT", "OKX"];
+  const labels = { BINANCE: "Binance", BYBIT: "Bybit", OKX: "OKX" };
+  const bar = document.getElementById("exchanges");
+  bar.innerHTML = exchanges.map(ex =>
+    `<button type="button" data-ex="${ex}" aria-pressed="false">${labels[ex]}</button>`
+  ).join("");
+  bar.addEventListener("click", e => {
+    const btn = e.target.closest("button");
+    if (btn) render(btn.dataset.ex);
+  });
+
+  const checkUrl = isPerp
+    ? `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}USDT`
+    : `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}${quote}`;
+  const timeout = new Promise(resolve => setTimeout(() => resolve("BINANCE"), 2500));
+  const probe = fetch(checkUrl).then(r => (r.status === 400 ? "BYBIT" : "BINANCE")).catch(() => "BINANCE");
+  Promise.race([probe, timeout]).then(render);
+})();
+</script>
+</body>
+</html>

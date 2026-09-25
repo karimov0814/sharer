@@ -39,6 +39,11 @@ jobs:
           DYOR_PASSWORD: ${{ secrets.DYOR_PASSWORD }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
+          # Ixtiyoriy: qisqa EN+UZ mazmun uchun (bo'lmasa xabar mazmunsiz ketadi)
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Ixtiyoriy: Telegram Mini App havolasi (bo'lmasa TradingView sayti ochiladi)
+          CHART_APP_LINK: ${{ secrets.CHART_APP_LINK }}
         run: python bot.py
 
       - name: Holatni (seen_ids.json, filters.json) repoga saqlash
