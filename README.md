@@ -60,10 +60,9 @@ GitHub Actions'ning ikkita "yashirin" cheklovi bor, va workflow endi ularning ik
 
 GitHub qoidasi: agar repoda **60 kun davomida hech qanday commit bo'lmasa**, scheduled (`cron`) workflow **avtomatik o'chirib qo'yiladi**. Bu bot esa `seen_ids.json`ni faqat **yangi post topilganda** commit qiladi — demak, agar dyor.net saytida uzoq vaqt (60+ kun) yangi post chiqmasa, workflow jimgina o'chib qolishi mumkin edi.
 
-Buning oldini olish uchun har bir run boshida **"Repo faolligini saqlab turish"** qadami qo'shildi (`gautamkrishnar/keepalive-workflow`). Bu qadam:
-- Oxirgi commitdan necha kun o'tganini tekshiradi;
-- Agar 45+ kun bo'lsa, alohida `keepalive` branch'iga kichik "heartbeat" commit qo'shadi (asosiy `main` branch va `seen_ids.json`ga tegmaydi);
-- Aks holda hech narsa qilmaydi — resurs sarflamaydi.
+Buning oldini olish uchun har run oxirida **"Workflow'ni faol saqlash"** qadami ishlaydi. U GitHub API'ning "enable workflow" chaqiruvini runner'da oldindan o'rnatilgan `gh` CLI orqali bajaradi: tashqi action ishlatilmaydi, dummy commit ham qilinmaydi. Buning uchun workflow'da `actions: write` ruxsati berilgan.
+
+> Avval bu yerda `gautamkrishnar/keepalive-workflow` action'i ishlatilgan edi. U GitHub tomonidan bloklandi va barcha run'lar "Repository access blocked" xatosi bilan boshlanmasdanoq to'xtab qolardi.
 
 ### 2. Xato haqida xabar (login muvaffaqiyatsiz, sayt strukturasi o'zgargan va h.k.)
 
