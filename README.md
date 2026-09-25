@@ -29,7 +29,7 @@ Bu bot https://dyor.net/posts sahifasidagi yangi postlarni belgilangan Telegram 
 ## 3-qadam: Kodni GitHub'ga joylash
 
 1. GitHub'da yangi **repository** yarating (public bo'lishi mumkin — bepul va cheksiz Actions daqiqasi beradi).
-2. Shu papkadagi barcha fayllarni (`bot.py`, `requirements.txt`, `.github/`, `seen_ids.json`, `README.md`) repoga yuklang.
+2. Shu papkadagi barcha fayllarni (`bot.py`, `requirements.txt`, `.github/`, `seen_ids.json`, `filters.json`, `README.md`) repoga yuklang.
 
 ## 4-qadam: Maxfiy kalitlarni (Secrets) qo'shish
 
@@ -39,7 +39,7 @@ Repo ichida: **Settings → Secrets and variables → Actions → New repository
 |---|---|
 | `BOT_TOKEN` | BotFather'dan olgan token |
 | `CHANNEL_ID` | Kanal username yoki ID (masalan `@mening_kanalim` yoki `-1001234567890`) |
-| `ADMIN_CHAT_ID` | *(ixtiyoriy, lekin tavsiya etiladi)* Bot ishlamay qolsa xato xabari keladigan shaxsiy chat/kanal ID'si — pastdagi "Xato haqida xabar" bo'limiga qarang |
+| `ADMIN_CHAT_ID` | **Filter tugmalarini boshqarish va xato xabarlarini olish uchun kerak.** Sizning shaxsiy Telegram chat ID'ingiz — pastdagi "Filter tugmalarini sozlash" bo'limiga qarang. Bo'lmasa ham bot ishlayveradi, lekin siz filterlarni tugmalar orqali boshqara olmaysiz (standart holatda hammasi yoqilgan bo'ladi). |
 
 ## 5-qadam: Ishga tushirish
 
@@ -69,12 +69,54 @@ Buning oldini olish uchun har bir run boshida **"Repo faolligini saqlab turish"*
 
 Avval bot xato bersa, buni faqat GitHub'ning **Actions** bo'limiga kirib logdan ko'rish mumkin edi. Endi run muvaffaqiyatsiz tugasa (masalan, login ishlamay qolsa yoki `fetch_posts()` hech narsa topa olmasa), **alohida Telegram xabari** avtomatik yuboriladi — bu xabar sizning kanalingizga emas, balki `ADMIN_CHAT_ID` orqali ko'rsatgan shaxsiy chatingizga/xizmat kanalizga tushadi.
 
-**Sozlash (ixtiyoriy, lekin tavsiya etiladi):**
-1. Botga (yoki istalgan botga) shaxsiy xabar yozing (`/start`).
-2. `https://api.telegram.org/bot<TOKEN>/getUpdates` orqali o'zingizning shaxsiy `chat.id`ingizni toping (xuddi kanal ID topgandagidek).
-3. Shu ID'ni `ADMIN_CHAT_ID` nomi bilan repo Secrets'ga qo'shing.
+**Sozlash:** `ADMIN_CHAT_ID`ni qanday olish "Filter tugmalarini sozlash" bo'limida tushuntirilgan (bu bir xil ID ikkala maqsad — filter boshqaruvi va xato xabarlari — uchun ishlatiladi).
 
 Agar `ADMIN_CHAT_ID` qo'shilmasa — hech narsa buzilmaydi, bu qadam shunchaki o'tkazib yuboriladi.
+
+## Filter tugmalarini sozlash (Telegram orqali)
+
+Kanalga qaysi signallar yuborilishini endi Telegram botning o'zi orqali, tugmalar bosib boshqarasiz — kodga tegmasdan.
+
+### ADMIN_CHAT_ID'ni olish (shart, aks holda tugmalar ishlamaydi)
+
+1. BotFather'da yaratgan botingizga (yuqoridagi 1-qadam) shaxsiy xabar yozing, masalan `/start`.
+2. Brauzerda `https://api.telegram.org/bot<TOKEN>/getUpdates` manzilini oching (`<TOKEN>` o'rniga o'z tokeningizni qo'ying).
+3. Javobdagi `"chat":{"id": 123456789, ...}` qismidan raqamni toping — shu sizning shaxsiy `chat.id`ingiz.
+4. Shu raqamni `ADMIN_CHAT_ID` nomi bilan repo Secrets'ga qo'shing (yuqoridagi 4-qadamga qarang).
+
+### Filter panelini ochish
+
+Botga shaxsiy xabar sifatida `/filters` (yoki `/start`) yuboring. Bot sizga tugmali panel yuboradi:
+
+| Tugma | Nima qiladi |
+|---|---|
+| ✅/❌ Bullish, ✅/❌ Bearish | Faqat shu yo'nalishdagi signallarni yuborish/yubormaslik |
+| ✅/❌ (timeframe, masalan 1H, 4H, 1D) | Har bir timeframe alohida yoqilishi/o'chirilishi mumkin. **Diqqat:** bu ro'yxat dinamik — faqat botning avval ko'rgan timeframe qiymatlari shu yerda chiqadi, shuning uchun birinchi marta ishga tushgandan keyingina to'ladi |
+| 🎯 Min ishonch: N% | Bosgan sayin 0% → 50% → 60% → 70% → 80% → 90% → yana 0% tartibida aylanadi. Faqat shu foizdan yuqori (yoki teng) `confidence`ga ega postlar yuboriladi |
+| 🌐 / 📋 Coinlar | "Barchasi" va "Faqat whitelist'dagilar" rejimlari orasida almashtiradi |
+| 🕐 Faqat oxirgi 24 soat | Pastda alohida tushuntirilgan — sana bo'yicha filtrni yoqib/o'chiradi |
+
+Coin whitelist matn buyruqlar orqali boshqariladi (chunki coinlar soni cheksiz, tugma sifatida sig'maydi):
+- `/addcoin BTC` — ro'yxatga qo'shadi
+- `/removecoin BTC` — ro'yxatdan olib tashlaydi
+- `/coins` — joriy ro'yxatni ko'rsatadi
+- `/help` — buyruqlar ro'yxati
+
+**Muhim:** bot GitHub Actions orqali davriy (masalan har 10 daqiqada) ishga tushadi, doimiy tinglab turmaydi. Shuning uchun tugma bosgandan yoki buyruq yuborgandan keyin o'zgarish darhol emas, keyingi run'da (~10 daqiqa ichida) kuchga kiradi.
+
+Barcha sozlamalar `filters.json` faylida saqlanadi va har run oxirida avtomatik repoga commit qilinadi (xuddi `seen_ids.json` kabi).
+
+### "Faqat oxirgi kungi signallar" (eski postlar yuborilmaydi)
+
+Standart holatda bot faqat **oxirgi 24 soat ichida yaratilgan** postlarni kanalga yuboradi — bundan eski postlar (masalan, birinchi marta ishga tushirilganda saytda turgan eski signallar) hech qachon yuborilmaydi. Buni `/filters` panelidagi "🕐 Faqat oxirgi 24 soat" tugmasi orqali yoqib/o'chirish mumkin.
+
+⚠️ **Muhim ogohlantirish:** post qachon yaratilganini sayt HTML kodidan aniqlash uchun yozilgan funksiya (`_extract_post_datetime` — `bot.py` ichida) men saytning haqiqiy sana/vaqt belgisini ko'rmasdan, umumiy taxminlar (`<time datetime="...">` yoki "3 soat oldin" kabi matnlar) asosida yozilgan. Bu **sizning saytingizda ishlamasligi mumkin**. Tekshirish uchun:
+
+1. GitHub'da **Actions** → oxirgi run → log'larni oching.
+2. `[debug] Post sanasi topilmadi...` degan qatorlar bor-yo'qligini tekshiring.
+3. Agar bor bo'lsa (yoki sana filtri kutilganidek ishlamayotgan bo'lsa), https://dyor.net/posts sahifasida bitta postning sana/vaqt ko'rsatiladigan qismini (masalan "3 soat oldin" yozuvi) Inspect qilib, shu HTML qismini menga yuboring — men `_extract_post_datetime` funksiyasini aniq moslab beraman.
+
+Sana aniqlanmagan postlar, xavfsizlik uchun, **yuborilaveradi** (ya'ni funksiya ishlamasa ham signal yo'qolib qolmaydi, faqat "faqat oxirgi kun" filtri o'sha post uchun qo'llanilmaydi).
 
 ## Mahalliy kompyuterda sinash
 
@@ -82,6 +124,7 @@ Agar `ADMIN_CHAT_ID` qo'shilmasa — hech narsa buzilmaydi, bu qadam shunchaki o
 pip install -r requirements.txt
 export BOT_TOKEN="123456:ABC..."
 export CHANNEL_ID="@mening_kanalim"
+export ADMIN_CHAT_ID="123456789"   # ixtiyoriy, filter tugmalari uchun
 python bot.py
 ```
 
