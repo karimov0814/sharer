@@ -69,8 +69,13 @@ CHANNEL_ID = os.environ.get("CHANNEL_ID", "")  # masalan: @mening_kanalim yoki -
 # ishlashda davom etadi: barcha filterlar standart holatda "yoqilgan" bo'ladi).
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 
-# Qisqa mazmun (EN + UZ) uchun Anthropic API kaliti. Bo'sh bo'lsa, xabar
+# Qisqa mazmun (EN + UZ) uchun AI kaliti. Bo'sh bo'lsa, xabar
 # mazmunsiz (faqat signal qismi bilan) yuboriladi — bot ishlashda davom etadi.
+# Ikkitadan biri yetarli. GEMINI_API_KEY bepul (Google AI Studio, karta kerak emas);
+# ikkalasi ham bo'lsa, Gemini ishlatiladi.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "") or "gemini-flash-latest"
+GEMINI_FALLBACK_MODEL = "gemini-2.5-flash"  # alias ishlamay qolsa
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "") or "claude-haiku-4-5-20251001"
 
@@ -80,6 +85,11 @@ ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "") or "claude-haiku-4-5-202
 CHART_APP_LINK = os.environ.get("CHART_APP_LINK", "").rstrip("/")
 
 STATE_FILE = Path(__file__).parent / "seen_ids.json"
+# Darajalari (Entry/TP/SL) hali ko'rinmayotgan postlar: {post_id: birinchi ko'rilgan vaqt}.
+# DYOR yangi setup postlarini 2 soat davomida faqat Premium'ga ko'rsatadi —
+# bot ularni shu yerda kutadi va ochilgach to'liq holda yuboradi.
+PENDING_FILE = Path(__file__).parent / "pending_posts.json"
+LOCKED_WAIT_HOURS = 3  # shuncha kutib ham darajalar chiqmasa, post boricha yuboriladi
 FILTERS_FILE = Path(__file__).parent / "filters.json"
 
 DEFAULT_FILTERS = {
@@ -225,6 +235,29 @@ def save_seen_ids(seen: set) -> None:
     # qayta yuborilishi mumkin edi.)
     trimmed = sorted(seen, key=_seen_sort_key)[-2000:]
     STATE_FILE.write_text(json.dumps(trimmed, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_pending() -> dict:
+    try:
+        return json.loads(PENDING_FILE.read_text(encoding="utf-8")) if PENDING_FILE.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_pending(pending: dict, now: datetime) -> None:
+    # 2 kundan eski yozuvlarni tozalaymiz (sayt sahifasidan allaqachon tushib ketgan)
+    keep = {}
+    for pid, first_seen in pending.items():
+        try:
+            if now - datetime.fromisoformat(first_seen) < timedelta(days=2):
+                keep[pid] = first_seen
+        except ValueError:
+            pass
+    PENDING_FILE.write_text(json.dumps(keep, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def has_levels(post: dict) -> bool:
+    return bool(post.get("entry") or post.get("tp") or post.get("sl"))
 
 
 def load_filters() -> dict:
@@ -544,40 +577,79 @@ Respond with JSON only, no markdown:
 {{"en": "...", "uz": "..."}}"""
 
 
+def _ask_gemini(prompt: str) -> Optional[str]:
+    """Google Gemini (bepul tarif). 429 bo'lsa biroz kutib qayta urinadi."""
+    for model in dict.fromkeys([GEMINI_MODEL, GEMINI_FALLBACK_MODEL]):
+        for attempt in range(3):
+            resp = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                headers={"x-goog-api-key": GEMINI_API_KEY, "content-type": "application/json"},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "responseMimeType": "application/json",
+                        "temperature": 0.3,
+                        "maxOutputTokens": 2048,
+                    },
+                },
+                timeout=60,
+            )
+            if resp.status_code == 429 and attempt < 2:
+                # Bepul tarifda daqiqasiga so'rovlar soni cheklangan -> kutamiz
+                print(f"[warn] Gemini limit (429), 20 soniya kutilmoqda...", file=sys.stderr)
+                time.sleep(20)
+                continue
+            if resp.status_code == 404:
+                print(f"[warn] Gemini modeli topilmadi: {model}", file=sys.stderr)
+                break  # keyingi modelga o'tamiz
+            if resp.status_code != 200:
+                print(f"[warn] Gemini API xatolik: {resp.status_code} {resp.text[:300]}", file=sys.stderr)
+                return None
+            parts = (resp.json().get("candidates") or [{}])[0].get("content", {}).get("parts", [])
+            return "".join(p.get("text", "") for p in parts if not p.get("thought"))
+    return None
+
+
+def _ask_anthropic(prompt: str) -> Optional[str]:
+    resp = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": ANTHROPIC_MODEL,
+            "max_tokens": 400,
+            "messages": [{"role": "user", "content": prompt}],
+        },
+        timeout=45,
+    )
+    if resp.status_code != 200:
+        print(f"[warn] Anthropic API xatolik: {resp.status_code} {resp.text[:300]}", file=sys.stderr)
+        return None
+    return "".join(b.get("text", "") for b in resp.json().get("content", []) if b.get("type") == "text")
+
+
 def summarize_post(post: dict) -> Optional[dict]:
-    """AI matnining 1 jumlalik EN + UZ mazmuni. Xato bo'lsa None (xabar mazmunsiz ketadi)."""
+    """AI matnining 1 jumlalik EN + UZ mazmuni. Kalit yo'q yoki xato bo'lsa None (xabar mazmunsiz ketadi)."""
     text = post.get("text")
-    if not ANTHROPIC_API_KEY or not text:
+    if not text or not (GEMINI_API_KEY or ANTHROPIC_API_KEY):
         return None
     title = f"{post.get('symbol')}/{post.get('pair')}"
     prompt = SUMMARY_PROMPT.format(
         title=title, tf=post.get("timeframe"), direction=post.get("direction"), text=text
     )
     try:
-        resp = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": ANTHROPIC_MODEL,
-                "max_tokens": 400,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=45,
-        )
-        if resp.status_code != 200:
-            print(f"[warn] Anthropic API xatolik: {resp.status_code} {resp.text[:300]}", file=sys.stderr)
+        raw = _ask_gemini(prompt) if GEMINI_API_KEY else _ask_anthropic(prompt)
+        if not raw:
             return None
-        raw = "".join(b.get("text", "") for b in resp.json().get("content", []) if b.get("type") == "text")
         raw = re.sub(r"^```(?:json)?|```$", "", raw.strip()).strip()
         data = json.loads(raw)
         en, uz = (data.get("en") or "").strip(), (data.get("uz") or "").strip()
         if en and uz:
             return {"en": en, "uz": uz}
-    except (requests.RequestException, ValueError, AttributeError) as exc:
+    except (requests.RequestException, ValueError, AttributeError, IndexError) as exc:
         print(f"[warn] Mazmun yaratib bo'lmadi ({title}): {exc}", file=sys.stderr)
     return None
 
@@ -1051,6 +1123,8 @@ def main() -> None:
     skipped_filter = 0
     skipped_age = 0
     send_failed = 0
+    waiting_locked = 0
+    pending = load_pending()
 
     # --- DIAGNOSTIKA: saytda nimalar ko'rindi va ulardan qaysilari yangi ---
     page_ids = [make_post_id(p) for p in posts]
@@ -1088,19 +1162,36 @@ def main() -> None:
             skipped_filter += 1
             continue
 
+        if not has_levels(post):
+            first_seen = pending.setdefault(pid, now.isoformat())
+            waited = now - datetime.fromisoformat(first_seen)
+            if waited < timedelta(hours=LOCKED_WAIT_HOURS):
+                mins = int(waited.total_seconds() // 60)
+                print(
+                    f"[debug] {pid}: Entry/TP/SL hali yashirin (Premium'ning 2 soatlik "
+                    f"muddati bo'lishi mumkin) — kutilmoqda, {mins} daqiqa o'tdi.",
+                    file=sys.stderr,
+                )
+                waiting_locked += 1
+                continue
+            print(f"[debug] {pid}: {LOCKED_WAIT_HOURS} soat kutildi, darajalar chiqmadi — boricha yuboriladi.", file=sys.stderr)
+
         message, keyboard = format_message(post, summarize_post(post))
         sent = send_to_telegram(message, keyboard)
         if sent:
             seen.add(pid)
+            pending.pop(pid, None)
             new_count += 1
             time.sleep(1.5)  # Telegram rate-limit uchun kichik pauza
         else:
             send_failed += 1
 
     save_seen_ids(seen)
+    save_pending(pending, now)
     save_filters(filters)
     print(
         f"Tugadi. Jami topilgan post: {len(posts)}, yangi yuborilgan: {new_count}, "
+        f"darajalari ochilishini kutayotgan: {waiting_locked}, "
         f"filterga mos kelmagani uchun o'tkazilgan: {skipped_filter}, "
         f"eski (24 soatdan katta) bo'lgani uchun o'tkazilgan: {skipped_age}, "
         f"Telegram'ga yuborib bo'lmagan: {send_failed}"

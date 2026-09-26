@@ -154,10 +154,15 @@ TP va SL foizlari Entry oralig'ining o'rtasiga nisbatan hisoblanadi. Havola kart
 
 ### Qisqa mazmun (ixtiyoriy)
 
-1. https://console.anthropic.com saytida API kalit oling (hisobda kredit bo'lishi kerak).
-2. Uni `ANTHROPIC_API_KEY` nomi bilan repo Secrets'ga qo'shing.
+**Bepul variant, Google Gemini:**
+1. https://aistudio.google.com/apikey saytiga Google akkaunt bilan kiring va **Create API key** tugmasini bosing. Karta talab qilinmaydi.
+2. Kalitni `GEMINI_API_KEY` nomi bilan repo Secrets'ga qo'shing.
 
-Kalit bo'lmasa yoki API xato bersa, xabar mazmun qismisiz yuboriladi va bot ishlashda davom etadi. Model standart holatda `claude-haiku-4-5-20251001`. Uni `ANTHROPIC_MODEL` secret'i orqali o'zgartirish mumkin.
+Standart model `gemini-flash-latest` (u ishlamasa `gemini-2.5-flash`). Uni `GEMINI_MODEL` secret'i orqali o'zgartirish mumkin. Bepul tarifda daqiqasiga so'rovlar soni cheklangan. Limitga yetilsa, bot 20 soniya kutib qayta urinadi.
+
+**Pullik variant, Anthropic:** `ANTHROPIC_API_KEY` (console.anthropic.com, hisob oldindan to'ldirilishi kerak). Ikkala kalit ham qo'shilgan bo'lsa, Gemini ishlatiladi.
+
+Kalit bo'lmasa yoki API xato bersa, xabar mazmun qismisiz yuboriladi va bot ishlashda davom etadi.
 
 ### Live chart Mini App (ixtiyoriy, lekin tavsiya etiladi)
 
