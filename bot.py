@@ -100,6 +100,10 @@ DEFAULT_FILTERS = {
     "timeframes": {},
     "min_confidence": 0,
     "confidence_options": [0, 50, 60, 70, 80, 90],
+    # Minimal foyda/xavf nisbati (R:R). 1.0 = TP'gacha masofa kamida SL'gacha
+    # masofaga teng bo'lishi shart. 0 = filtr o'chiq.
+    "min_rr": 1.0,
+    "rr_options": [0, 1.0, 1.5, 2.0, 3.0],
     "symbol_mode": "all",  # "all" = cheklovsiz, "whitelist" = faqat ro'yxatdagilar
     "symbol_whitelist": [],
     "only_last_24h": True,
@@ -693,6 +697,34 @@ def chart_url(post: dict) -> str:
     return f"https://www.tradingview.com/chart/?symbol={_tv_symbol(post)}&interval={interval}"
 
 
+# --- Foyda / xavf nisbati ----------------------------------------------------------
+
+def risk_reward(post: dict) -> Optional[float]:
+    """
+    R:R = (TP gacha masofa) / (SL gacha masofa), Entry oralig'ining o'rtasidan.
+    Xabardagi foizlar ham shu nuqtadan hisoblanadi, shuning uchun ular mos keladi.
+    Darajalar yo'q bo'lsa None; TP/SL noto'g'ri tomonda bo'lsa 0.0.
+    """
+    entry = _parse_prices(post.get("entry"))
+    tps = _parse_prices(post.get("tp"))
+    sls = _parse_prices(post.get("sl"))
+    if not (entry and tps and sls):
+        return None
+    base = sum(entry) / len(entry)
+    tp, sl = tps[0], sls[0]
+    if (post.get("direction") or "").lower() == "bearish":
+        reward, risk = base - tp, sl - base
+    else:
+        reward, risk = tp - base, base - sl
+    if reward <= 0 or risk <= 0:
+        return 0.0
+    return float(reward / risk)
+
+
+def fmt_rr(rr: float) -> str:
+    return f"1:{rr:.1f}"
+
+
 # --- Xabar ------------------------------------------------------------------------
 
 def format_message(post: dict, summary: Optional[dict] = None) -> tuple:
@@ -723,6 +755,10 @@ def format_message(post: dict, summary: Optional[dict] = None) -> tuple:
         for v in values:
             extra = f" ({_pct_from(base, v)})" if base else ""
             lines.append(f"{label}: <code>{fmt_price(v)}</code>{extra}")
+
+    rr = risk_reward(post)
+    if rr:
+        lines.append(f"⚖️ R:R {fmt_rr(rr)}")
 
     if summary:
         lines.append("")
@@ -931,6 +967,12 @@ def build_keyboard(filters: dict) -> list:
         ]
     )
 
+    min_rr = float(filters.get("min_rr", 1.0) or 0)
+    rr_label = "o'chiq" if min_rr <= 0 else fmt_rr(min_rr)
+    rows.append(
+        [{"text": f"⚖️ Min R:R: {rr_label} (o'zgartirish uchun bosing)", "callback_data": "rr:cycle"}]
+    )
+
     mode = filters.get("symbol_mode", "all")
     whitelist = filters.get("symbol_whitelist", [])
     if mode == "all":
@@ -1034,6 +1076,11 @@ def handle_callback(callback: dict, filters: dict) -> None:
         current = filters.get("min_confidence", 0)
         idx = options.index(current) if current in options else -1
         filters["min_confidence"] = options[(idx + 1) % len(options)]
+    elif data == "rr:cycle":
+        options = filters.get("rr_options", [0, 1.0, 1.5, 2.0, 3.0])
+        current = float(filters.get("min_rr", 1.0) or 0)
+        idx = options.index(current) if current in options else -1
+        filters["min_rr"] = options[(idx + 1) % len(options)]
     elif data == "sym:mode":
         filters["symbol_mode"] = "whitelist" if filters.get("symbol_mode", "all") == "all" else "all"
     elif data == "age:toggle":
@@ -1124,6 +1171,7 @@ def main() -> None:
     skipped_age = 0
     send_failed = 0
     waiting_locked = 0
+    skipped_rr = 0
     pending = load_pending()
 
     # --- DIAGNOSTIKA: saytda nimalar ko'rindi va ulardan qaysilari yangi ---
@@ -1176,6 +1224,17 @@ def main() -> None:
                 continue
             print(f"[debug] {pid}: {LOCKED_WAIT_HOURS} soat kutildi, darajalar chiqmadi — boricha yuboriladi.", file=sys.stderr)
 
+        min_rr = float(filters.get("min_rr", 1.0) or 0)
+        if min_rr > 0:
+            rr = risk_reward(post)
+            if rr is None or rr < min_rr:
+                # seen'ga QO'SHILMAYDI: admin min R:R ni pasaytirsa, post qayta baholanadi.
+                shown = "darajalar yo'q" if rr is None else fmt_rr(rr)
+                print(f"[debug] {pid}: R:R {shown} < {fmt_rr(min_rr)} — yuborilmadi.", file=sys.stderr)
+                pending.pop(pid, None)
+                skipped_rr += 1
+                continue
+
         message, keyboard = format_message(post, summarize_post(post))
         sent = send_to_telegram(message, keyboard)
         if sent:
@@ -1192,6 +1251,7 @@ def main() -> None:
     print(
         f"Tugadi. Jami topilgan post: {len(posts)}, yangi yuborilgan: {new_count}, "
         f"darajalari ochilishini kutayotgan: {waiting_locked}, "
+        f"R:R past bo'lgani uchun o'tkazilgan: {skipped_rr}, "
         f"filterga mos kelmagani uchun o'tkazilgan: {skipped_filter}, "
         f"eski (24 soatdan katta) bo'lgani uchun o'tkazilgan: {skipped_age}, "
         f"Telegram'ga yuborib bo'lmagan: {send_failed}"
