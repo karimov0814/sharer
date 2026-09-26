@@ -16,6 +16,14 @@
     80,
     90
   ],
+  "min_rr": 1.0,
+  "rr_options": [
+    0,
+    1.0,
+    1.5,
+    2.0,
+    3.0
+  ],
   "symbol_mode": "all",
   "symbol_whitelist": [],
   "only_last_24h": true,
