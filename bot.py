@@ -44,6 +44,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Optional
 
@@ -83,6 +84,9 @@ ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "") or "claude-haiku-4-5-202
 # (BotFather -> /newapp orqali yaratiladi, README'ga qarang). Bo'sh bo'lsa,
 # "Live chart" tugmasi TradingView saytini Telegram ichki brauzerida ochadi.
 CHART_APP_LINK = os.environ.get("CHART_APP_LINK", "").rstrip("/")
+
+# Xabardagi vaqtlar shu zonada ko'rsatiladi (standart: Toshkent, UTC+5).
+DISPLAY_TZ = ZoneInfo(os.environ.get("DISPLAY_TZ", "") or "Asia/Tashkent")
 
 STATE_FILE = Path(__file__).parent / "seen_ids.json"
 # Darajalari (Entry/TP/SL) hali ko'rinmayotgan postlar: {post_id: birinchi ko'rilgan vaqt}.
@@ -334,9 +338,11 @@ def _extract_post_id(article) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def _extract_post_datetime(article) -> Optional[datetime]:
+def _extract_post_datetime(article) -> tuple:
     """
-    Post yaratilgan vaqtni aniqlashga harakat qiladi (UTC qaytaradi).
+    Post yaratilgan vaqtni aniqlashga harakat qiladi.
+    (UTC vaqt, manba) qaytaradi. Manba: "exact" — HTML'dagi aniq vaqt tamg'asi;
+    "relative" — "30m", "12h" kabi nisbiy matndan taxminiy hisob; topilmasa (None, None).
 
     DIQQAT (TODO): bu funksiya dyor.net'ning haqiqiy sana/vaqt HTML
     belgisini ko'rmasdan, umumiy taxminlar asosida yozilgan. Agar u doim
@@ -353,7 +359,7 @@ def _extract_post_datetime(article) -> Optional[datetime]:
             dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc)
+            return dt.astimezone(timezone.utc), "exact"
         except ValueError:
             pass
 
@@ -364,17 +370,31 @@ def _extract_post_datetime(article) -> Optional[datetime]:
             raw = el.get(attr_name).strip()
             try:
                 if raw.isdigit():
-                    return datetime.fromtimestamp(int(raw), tz=timezone.utc)
+                    ts = int(raw)
+                    if ts > 10**12:  # millisekundlarda berilgan bo'lsa
+                        ts //= 1000
+                    return datetime.fromtimestamp(ts, tz=timezone.utc), "exact"
                 dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
-                return dt.astimezone(timezone.utc)
+                return dt.astimezone(timezone.utc), "exact"
             except (ValueError, OSError):
                 pass
 
     # 3) Nisbiy vaqt matni: "5 daqiqa oldin", "3 soat oldin", "2 kun oldin",
     #    "bugun", "kecha" va shunga o'xshash iboralar.
     text = _clean_text(article.get_text(" ", strip=True)).lower()
+
+    # Sayt post muallifi yonida qisqa nisbiy vaqt ko'rsatadi: "@rody_ai · 30m", "12h", "2d".
+    # Faqat muallif nomidan keyin darhol kelganini olamiz, aks holda "1d" timeframe
+    # yoki matndagi sonlar bilan adashib ketish mumkin.
+    m = re.search(r"@rody_ai\s*[·•.\-]?\s*(\d{1,3})\s*(m|min|h|d|w)\b", text)
+    if m:
+        amount, unit = int(m.group(1)), m.group(2)
+        delta = {"m": timedelta(minutes=amount), "min": timedelta(minutes=amount),
+                 "h": timedelta(hours=amount), "d": timedelta(days=amount),
+                 "w": timedelta(weeks=amount)}[unit]
+        return datetime.now(timezone.utc) - delta, "relative"
 
     m = re.search(
         r"\b(\d{1,3})\s*(daqiqa|minut|min|soat|soatlar|soatdan|kun|kunlar|hafta)\b",
@@ -391,16 +411,16 @@ def _extract_post_datetime(article) -> Optional[datetime]:
             delta = timedelta(weeks=amount)
         else:  # kun / kunlar
             delta = timedelta(days=amount)
-        return datetime.now(timezone.utc) - delta
+        return datetime.now(timezone.utc) - delta, "relative"
 
     if re.search(r"\bhozir(gina)?\b|\bjust now\b", text):
-        return datetime.now(timezone.utc)
+        return datetime.now(timezone.utc), "relative"
     if re.search(r"\bbugun\b|\btoday\b", text):
-        return datetime.now(timezone.utc)
+        return datetime.now(timezone.utc), "relative"
     if re.search(r"\bkecha\b|\byesterday\b", text):
-        return datetime.now(timezone.utc) - timedelta(days=1)
+        return datetime.now(timezone.utc) - timedelta(days=1), "relative"
 
-    return None
+    return None, None
 
 
 def fetch_posts(session: requests.Session, filters: dict) -> list:
@@ -486,7 +506,12 @@ def fetch_posts(session: requests.Session, filters: dict) -> list:
         sl = _extract_level(article, "SL")
         tp = _extract_level(article, "TP")
 
-        posted_at = _extract_post_datetime(article)
+        posted_at, posted_src = _extract_post_datetime(article)
+        print(
+            f"[debug] post-{post_id} vaqti: "
+            f"{posted_at.isoformat(timespec='minutes') if posted_at else '—'} (manba: {posted_src or 'topilmadi'})",
+            file=sys.stderr,
+        )
         if posted_at is None:
             print(
                 f"[debug] Post sanasi topilmadi (post_id={post_id}). "
@@ -511,6 +536,7 @@ def fetch_posts(session: requests.Session, filters: dict) -> list:
                 "text": text,
                 "url": href,
                 "posted_at": posted_at,
+                "posted_src": posted_src,
             }
         )
 
@@ -725,6 +751,30 @@ def fmt_rr(rr: float) -> str:
     return f"1:{rr:.1f}"
 
 
+def format_post_time(post: dict, now: Optional[datetime] = None) -> Optional[str]:
+    """
+    "🕒 Saytda: 14:32 · kanalga +4 daq" — post saytga chiqqan vaqt va kanalga
+    qancha kechikib yetgani. Nisbiy manbadan olingan vaqt "~" bilan belgilanadi
+    ("12h" kabi yozuv faqat soatgacha aniq bo'ladi).
+    """
+    posted_at = post.get("posted_at")
+    if not posted_at:
+        return None
+    now = now or datetime.now(timezone.utc)
+    local = posted_at.astimezone(DISPLAY_TZ)
+    approx = post.get("posted_src") != "exact"
+    today = now.astimezone(DISPLAY_TZ).date()
+    clock = local.strftime("%H:%M") if local.date() == today else local.strftime("%d.%m %H:%M")
+
+    mins = max(0, int((now - posted_at).total_seconds() // 60))
+    if mins < 60:
+        delay = f"{mins} daq"
+    else:
+        h, m = divmod(mins, 60)
+        delay = f"{h} soat {m} daq" if m else f"{h} soat"
+    return f"🕒 Saytda: {'~' if approx else ''}{clock} · kanalga +{'~' if approx else ''}{delay}"
+
+
 # --- Xabar ------------------------------------------------------------------------
 
 def format_message(post: dict, summary: Optional[dict] = None) -> tuple:
@@ -759,6 +809,10 @@ def format_message(post: dict, summary: Optional[dict] = None) -> tuple:
     rr = risk_reward(post)
     if rr:
         lines.append(f"⚖️ R:R {fmt_rr(rr)}")
+
+    time_line = format_post_time(post)
+    if time_line:
+        lines.append(time_line)
 
     if summary:
         lines.append("")
