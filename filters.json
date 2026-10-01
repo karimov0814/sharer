@@ -5,7 +5,8 @@
   },
   "timeframes": {
     "1d": true,
-    "4h": true
+    "4h": true,
+    "1w": true
   },
   "min_confidence": 0,
   "confidence_options": [
