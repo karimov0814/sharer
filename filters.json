@@ -6,7 +6,8 @@
   "timeframes": {
     "1d": true,
     "4h": true,
-    "1w": true
+    "1w": true,
+    "3d": true
   },
   "min_confidence": 0,
   "confidence_options": [
